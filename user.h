@@ -23,6 +23,7 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int set_burst(int pid, int bt);
 
 // ulib.c
 int stat(const char*, struct stat*);

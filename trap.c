@@ -102,9 +102,48 @@ trap(struct trapframe *tf)
 
   // Force process to give up CPU on clock tick.
   // If interrupts were on while locks held, would need to check nlock.
+#if defined(SCHED_SRTF)
+  // Question 1 (SRTF): On a timer interrupt, decrement remaining_time of the
+  // currently running process. If another RUNNABLE process has a strictly
+  // smaller remaining_time, the current process must yield() the CPU.
+  if(myproc() && myproc()->state == RUNNING &&
+     tf->trapno == T_IRQ0+IRQ_TIMER){
+    if(myproc()->burst_time > 0 && myproc()->remaining_time > 1)
+      myproc()->remaining_time--;
+    if(should_preempt_srtf())
+      yield();
+  }
+#elif defined(SCHED_HRRN)
+  // Question 2 (HRRN): Non-preemptive scheduler; let process run to completion
+  // without timer preemption.
+#elif defined(SCHED_MLFQ)
+  // Question 3 (MLFQ): Allow processes in level 0 to run for 1 tick,
+  // level 1 for 2 ticks, and level 2 for 4 ticks.
+  // If a process uses its entire time allotted for its queue without yielding,
+  // increment its queue_level (demoting it) and call yield().
+  if(myproc() && myproc()->state == RUNNING &&
+     tf->trapno == T_IRQ0+IRQ_TIMER){
+    struct proc *p = myproc();
+    int quantum = (p->queue_level == 0) ? 1 : ((p->queue_level == 1) ? 2 : 4);
+    p->ticks_used++;
+    if(p->ticks_used >= quantum){
+      p->ticks_used = 0;
+      if(p->queue_level < 2){
+        p->queue_level++;
+        if(p->pid > 3)
+          cprintf("[MLFQ] PID %d used full quantum (%d tick%s) -> demoted to Queue %d\n",
+                  p->pid, quantum, (quantum > 1 ? "s" : ""), p->queue_level);
+      }
+      yield();
+    } else if(should_preempt_mlfq(p->queue_level)){
+      yield();
+    }
+  }
+#else
   if(myproc() && myproc()->state == RUNNING &&
      tf->trapno == T_IRQ0+IRQ_TIMER)
     yield();
+#endif
 
   // Check if the process has been killed since we yielded
   if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)

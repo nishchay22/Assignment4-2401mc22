@@ -88,7 +88,11 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
-
+  p->ctime = ticks;          // Q2 (HRRN): creation time in ticks
+  p->burst_time = 0;         // Q1 (SRTF) & Q2 (HRRN): expected burst time
+  p->remaining_time = 0;     // Q1 (SRTF): remaining time in ticks
+  p->queue_level = 0;        // Q3 (MLFQ): all new processes start at level 0
+  p->ticks_used = 0;         // Q3 (MLFQ): ticks used in current queue level
   release(&ptable.lock);
 
   // Allocate kernel stack.
@@ -325,6 +329,9 @@ scheduler(void)
   struct proc *p;
   struct cpu *c = mycpu();
   c->proc = 0;
+#if defined(SCHED_MLFQ)
+  int mlfq_rr_idx[3] = {0, 0, 0};
+#endif
   
   for(;;){
     // Enable interrupts on this processor.
@@ -332,6 +339,105 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+
+#if defined(SCHED_SRTF)
+    // Question 1: Preemptive Shortest Remaining Time First (SRTF) Scheduler
+    // Among all RUNNABLE processes, always pick the one with the smallest remaining_time.
+    struct proc *min_p = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
+      if(min_p == 0){
+        min_p = p;
+      } else {
+        int p_rem = (p->burst_time <= 0) ? 0x7fffffff : p->remaining_time;
+        int min_rem = (min_p->burst_time <= 0) ? 0x7fffffff : min_p->remaining_time;
+        if(p_rem < min_rem)
+          min_p = p;
+      }
+    }
+    if(min_p != 0){
+      p = min_p;
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      c->proc = 0;
+    }
+
+#elif defined(SCHED_HRRN)
+    // Question 2: Non-Preemptive Highest Response Ratio Next (HRRN) Scheduler
+    // Response Ratio = ((Wait Time + Burst Time) * 100) / Burst Time
+    // where Wait Time = ticks - ctime.
+    struct proc *best_p = 0;
+    int best_rr = -1;
+    int best_wait = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
+      int wait_time = (ticks >= p->ctime) ? (int)(ticks - p->ctime) : 0;
+      int rr;
+      if(p->burst_time <= 0){
+        rr = 1; // Unset burst_time (e.g., init/sh) scheduled after declared jobs
+      } else {
+        rr = ((wait_time + p->burst_time) * 100) / p->burst_time;
+      }
+      if(best_p == 0 || rr > best_rr){
+        best_p = p;
+        best_rr = rr;
+        best_wait = wait_time;
+      }
+    }
+    if(best_p != 0){
+      p = best_p;
+      if(p->burst_time > 1){
+        cprintf("[HRRN] Selected PID %d (wait=%d, burst=%d, RR=%d)\n",
+                p->pid, best_wait, p->burst_time, best_rr);
+      }
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      c->proc = 0;
+    }
+
+#elif defined(SCHED_MLFQ)
+    // Question 3: Multilevel Feedback Queue (MLFQ) Scheduler
+    // Strictly pick RUNNABLE processes from the highest available priority queue
+    // (level 0 first, then 1, then 2). Break ties within the same queue using Round-Robin.
+    struct proc *best_p = 0;
+    int level, i;
+    for(level = 0; level <= 2 && best_p == 0; level++){
+      for(i = 0; i < NPROC; i++){
+        int idx = (mlfq_rr_idx[level] + 1 + i) % NPROC;
+        p = &ptable.proc[idx];
+        if(p->state == RUNNABLE && p->queue_level == level){
+          best_p = p;
+          mlfq_rr_idx[level] = idx;
+          break;
+        }
+      }
+    }
+    if(best_p != 0){
+      p = best_p;
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      c->proc = 0;
+    }
+
+#else
+    // Default Round-Robin Scheduler
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
@@ -350,6 +456,8 @@ scheduler(void)
       // It should have changed its p->state before coming back.
       c->proc = 0;
     }
+#endif
+
     release(&ptable.lock);
 
   }
@@ -438,6 +546,7 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
+  p->ticks_used = 0; // Q3 (MLFQ): reset ticks_used when yielding voluntarily (I/O sleep)
 
   sched();
 
@@ -531,4 +640,69 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+// Q1 (SRTF) & Q2 (HRRN): Set expected burst time (in ticks) and initialize remaining_time
+int
+set_burst(int pid, int bt)
+{
+  struct proc *p;
+
+  if(bt < 0)
+    return -1;
+
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state != UNUSED && p->pid == pid){
+      p->burst_time = bt;
+      p->remaining_time = bt;
+      release(&ptable.lock);
+      return 0;
+    }
+  }
+  release(&ptable.lock);
+  return -1;
+}
+
+// Q1 (SRTF): Check if any RUNNABLE process has a strictly smaller remaining_time
+// than the currently running process.
+int
+should_preempt_srtf(void)
+{
+  struct proc *p;
+  struct proc *cur = myproc();
+  if(cur == 0)
+    return 0;
+
+  int cur_rem = (cur->burst_time <= 0) ? 0x7fffffff : cur->remaining_time;
+
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state != RUNNABLE)
+      continue;
+    int p_rem = (p->burst_time <= 0) ? 0x7fffffff : p->remaining_time;
+    if(p_rem < cur_rem){
+      release(&ptable.lock);
+      return 1;
+    }
+  }
+  release(&ptable.lock);
+  return 0;
+}
+
+// Q3 (MLFQ): Check if any RUNNABLE process is in a higher-priority queue (< cur_level)
+int
+should_preempt_mlfq(int cur_level)
+{
+  struct proc *p;
+
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state == RUNNABLE && p->queue_level < cur_level){
+      release(&ptable.lock);
+      return 1;
+    }
+  }
+  release(&ptable.lock);
+  return 0;
 }

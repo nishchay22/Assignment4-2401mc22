@@ -49,6 +49,11 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  uint ctime;                  // Q2 (HRRN): Process creation time in ticks
+  int burst_time;              // Q1 (SRTF) & Q2 (HRRN): Expected CPU burst time in ticks
+  int remaining_time;          // Q1 (SRTF): Remaining execution time in ticks
+  int queue_level;             // Q3 (MLFQ): Priority queue level (0 = highest, 1 = medium, 2 = lowest)
+  int ticks_used;              // Q3 (MLFQ): Ticks used in current queue's time allotment
 };
 
 // Process memory is laid out contiguously, low addresses first:

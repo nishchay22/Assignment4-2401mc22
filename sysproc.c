@@ -89,3 +89,15 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// Q1 (SRTF) & Q2 (HRRN): Set expected CPU burst time (in ticks) for process pid
+// and initialize remaining_time to bt.
+int
+sys_set_burst(void)
+{
+  int pid, bt;
+
+  if(argint(0, &pid) < 0 || argint(1, &bt) < 0)
+    return -1;
+  return set_burst(pid, bt);
+}
